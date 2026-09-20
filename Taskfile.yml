@@ -4,6 +4,8 @@ vars:
   KIND_CLUSTER_CONFIG: kind/cluster.yaml
   KIND_CLUSTER_NAME: k8s-practice-cluster-kind
   KUBECTL: kubectl --context kind-{{.KIND_CLUSTER_NAME}}
+  REGISTRY_HOST_PORT: 5001
+  REGISTRY_NODE_PORT: 30500
 
 tasks:
   default:
@@ -41,11 +43,64 @@ tasks:
 
   deploy:
     desc: Deploy RabbitMQ and Oracle
+    deps: [cluster:create]
     cmds:
       - "{{.KUBECTL}} apply -k deploy/rabbitmq/"
       - "{{.KUBECTL}} apply -k deploy/oracle/"
+      - "{{.KUBECTL}} rollout status deploy/rabbitmq --timeout=180s"
+      - "{{.KUBECTL}} rollout status deploy/oracle --timeout=600s"
 
   restart:
     desc: Restart RabbitMQ and Oracle deployments
     cmds:
       - "{{.KUBECTL}} rollout restart deploy/oracle deploy/rabbitmq"
+      - "{{.KUBECTL}} rollout status deploy/rabbitmq deploy/oracle --timeout=600s"
+
+  status:
+    desc: Show pods, services and PVCs
+    cmds:
+      - "{{.KUBECTL}} get pods,svc,pvc -o wide"
+
+  logs:oracle:
+    desc: Tail Oracle logs
+    cmds:
+      - "{{.KUBECTL}} logs -f deploy/oracle"
+
+  pf:rabbitmq:
+    desc: Forward RabbitMQ AMQP (5672) and management UI (15672)
+    cmds:
+      - "{{.KUBECTL}} port-forward svc/rabbitmq 5672:5672 15672:15672"
+
+  pf:oracle:
+    desc: Forward Oracle listener (1521)
+    cmds:
+      - "{{.KUBECTL}} port-forward svc/oracle 1521:1521"
+
+  registry:deploy:
+    desc: Deploy the in-cluster registry
+    cmds:
+      - "{{.KUBECTL}} apply -k deploy/registry/"
+      - "{{.KUBECTL}} rollout status deploy/registry --timeout=120s"
+
+  registry:configure-nodes:
+    desc: Point every node's containerd at the in-cluster registry
+    cmds:
+      - |
+        for node in $(kind get nodes --name {{.KIND_CLUSTER_NAME}}); do
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:{{.REGISTRY_HOST_PORT}}
+          printf '[host."http://localhost:{{.REGISTRY_NODE_PORT}}"]\n' | \
+            docker exec -i "$node" tee /etc/containerd/certs.d/localhost:{{.REGISTRY_HOST_PORT}}/hosts.toml >/dev/null
+        done
+
+  registry:test:
+    desc: Check the registry is reachable from the host
+    cmds:
+      - curl -fsS http://localhost:{{.REGISTRY_HOST_PORT}}/v2/_catalog
+
+  up:
+    desc: Create cluster, registry, and apps
+    cmds:
+      - task: cluster:create
+      - task: registry:deploy
+      - task: registry:configure-nodes
+      - task: deploy
